@@ -127,6 +127,16 @@ console is at http://localhost:9001 (minioadmin/minioadmin).
 
 When you're done: `just down` (stop) or `just clean` (delete everything).
 
+Two benign things you may see on a first run:
+
+- `astro dev start` can report *"The api-server health check timed out"* —
+  the containers keep starting anyway (`docker ps` to confirm); it's just a
+  slow first boot under Docker Desktop.
+- The DAG processor logs *"Staging from archive failed, falling back to
+  per-object sync"* until `just seed` has run — that's the fallback path
+  doing its job against an empty bucket, and it recovers by itself on the
+  next refresh.
+
 ## Where the behaviour lives upstream
 
 - [`S3DagBundle.refresh()`](https://github.com/apache/airflow/blob/main/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
