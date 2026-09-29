@@ -48,9 +48,10 @@ Airflow's `GitDagBundle` gets this implicitly, the object-store bundles don't
 
 `bundle_pkg/` contains a ~100-line proof of concept, `S3ArchiveDagBundle`,
 that subclasses the stock bundle and changes only the staging strategy: fetch
-one `.tar.gz` (conditional on ETag), unpack safely, atomically swap — and
-**fall back to the inherited per-object sync on any archive problem**, so the
-worst case is exactly today's behaviour.
+one `.tar.gz` (conditional on ETag), unpack safely, atomically swap. The
+archive is **mutually exclusive with `prefix`** — it replaces the per-object
+sync rather than shadowing it, so there is no second copy of the DAGs to keep
+in sync and no fallback between the two.
 
 ## Prerequisites
 
@@ -132,10 +133,11 @@ Two benign things you may see on a first run:
 - `astro dev start` can report *"The api-server health check timed out"* —
   the containers keep starting anyway (`docker ps` to confirm); it's just a
   slow first boot under Docker Desktop.
-- The DAG processor logs *"Staging from archive failed, falling back to
-  per-object sync"* until `just seed` has run — that's the fallback path
-  doing its job against an empty bucket, and it recovers by itself on the
-  next refresh.
+- The DAG processor logs an *"S3 archive ... does not exist"* error for the
+  `s3-archive` bundle until `just seed` has run. `just e2e` necessarily starts
+  Airflow before seeding (the seed step uploads to MinIO, which `up` brings
+  up), so the window is expected; it clears on the next refresh once the
+  archive exists. The `s3-per-object` bundle is unaffected.
 
 ## Where the behaviour lives upstream
 
@@ -160,10 +162,13 @@ justfile               all of the above, wired end to end
 
 ## Notes
 
-- The archive layout must mirror the prefix layout (`tar -C dags .`), so the
-  per-object fallback stages an identical tree.
+- Members are extracted relative to the bundle root, so pack the *contents* of
+  the DAGs directory (`tar -C dags .`) rather than the directory itself. The
+  benchmark relies on both strategies producing an identical tree so the
+  comparison is like-for-like.
 - The PoC extracts with `tarfile`'s `filter="data"` (path-traversal safe) and
   swaps directories by rename, keeping partially-staged states invisible.
-- `prefix` is retained purely as the fallback path: delete the archive object
-  and rerun `just bench` to watch the archive bundle degrade gracefully to the
-  stock sync.
+- `prefix` and `archive_key` are mutually exclusive; passing both raises at
+  construction. Delete the archive object and rerun `just bench` to watch the
+  archive bundle fail loudly instead of silently staging from somewhere else —
+  that is the point of dropping the fallback.

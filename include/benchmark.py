@@ -107,7 +107,6 @@ def main() -> None:
         lambda: S3ArchiveDagBundle(
             name="bench-archive",
             bucket_name=BUCKET,
-            prefix=PREFIX,
             archive_key=ARCHIVE_KEY,
             aws_conn_id="aws_default",
         ),
