@@ -106,42 +106,46 @@ That runs, in order:
 Each benchmark round deletes the bundle's local directory first and leaves the
 sibling `.{name}/etag` marker. That is the fresh-worker simulation: the archive
 class sees an empty directory and restages even when the ETag marker still
-matches. Sample output (Apple Silicon laptop, everything on localhost — real
-S3 adds ~an order of magnitude more per-request latency):
+matches. Measured with `just bench` on loopback MinIO (Astro Runtime 3.3-7,
+Airflow 3.3.1+astro.4, amazon provider 9.37.0). Real S3 adds ~an order of
+magnitude more per-request latency:
 
 ```
 Cold-staging benchmark, 3 rounds each (local dir wiped before every round)
 
 [1/2] stock S3DagBundle — serial per-object sync
-  round 1:  13.89s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
-  round 2:  15.84s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
-  round 3:  23.32s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
+  round 1:   2.08s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
+  round 2:   2.02s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
+  round 3:   2.11s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
 
 [2/2] S3ArchiveDagBundle — single tar.gz object
-  round 1:   3.21s   (getobject=1, headbucket=1, headobject=1)
-  round 2:   0.87s   (getobject=1, headbucket=1, headobject=1)
-  round 3:   1.48s   (getobject=1, headbucket=1, headobject=1)
+  round 1:   0.11s   (getobject=1, headbucket=1, headobject=1)
+  round 2:   0.11s   (getobject=1, headbucket=1, headobject=1)
+  round 3:   0.14s   (getobject=1, headbucket=1, headobject=1)
 
 ==========================================================================
 scenario                                   median   S3 reqs   files
 --------------------------------------------------------------------------
-per-object sync (stock S3DagBundle)        15.84s       802     400
-single archive (S3ArchiveDagBundle)         1.48s         2     400
+per-object sync (stock S3DagBundle)         2.08s       802     400
+single archive (S3ArchiveDagBundle)         0.11s         2     400
 ==========================================================================
 
-speedup: 10.7x   (every KubernetesExecutor task pod pays the cold-staging cost)
+speedup: 18.5x   (every KubernetesExecutor task pod pays the cold-staging cost)
 ```
 
-Timings are from a loopback MinIO run on a laptop; round-to-round variance is
-Docker noise. Per-object counts stay at 400 GET + 400 HEAD plus listings. The
-archive classpath does one HeadObject (ETag) and one GetObject (1 MiB
-`copyfileobj`) per cold stage, plus the bucket HEAD from initialization. A
-stray call in a live round is the DAG processor refreshing its own bundles
-against the same MinIO.
+The request mix did not move between rounds. Stock cold staging is 400 GET
++ 400 HEAD, plus one ListObjectsV1 and one ListObjectsV2 (802 calls in the
+table; initialization also sends a bucket HEAD). The archive classpath does
+one HeadObject (ETag) and one GetObject (1 MiB `copyfileobj`) per cold stage,
+plus that bucket HEAD — 2 calls in the table. These rounds had no stray
+requests from the live DAG processor. Another run can pick one up when that
+processor refreshes its own bundles against the same MinIO.
 
-(Real S3 adds ~25–40 ms of network round-trip per request, which is why the
-same 400-file bundle costs 20+ seconds per pod in a real deployment. The cost
-scales linearly with file count and per-request latency, not with bytes.)
+Loopback MinIO makes each stock call about 3 ms, so 18.5× wall clock is the
+floor on this machine. Real S3 adds ~25–40 ms of network round-trip per
+request, which is why the same 400-file bundle costs 20+ seconds per pod in
+a real deployment. The cost scales linearly with file count and per-request
+latency, not with bytes.
 
 `just bench` against this tree (Runtime 3.3-7, amazon provider 9.37.0 with
 `vendor/s3.py` from `ad0592a` overlaid, Silo on the loopback, 400 files):
