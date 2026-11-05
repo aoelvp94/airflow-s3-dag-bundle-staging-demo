@@ -20,9 +20,7 @@ import sys
 import time
 import urllib.request
 
-from airflow.providers.amazon.aws.bundles.s3 import S3DagBundle
-
-from s3_archive_bundle import S3ArchiveDagBundle
+from airflow.providers.amazon.aws.bundles.s3 import S3ArchiveDagBundle, S3DagBundle
 
 METRICS_URL = "http://minio:9000/minio/v2/metrics/cluster"
 BUCKET = "dag-bundles"

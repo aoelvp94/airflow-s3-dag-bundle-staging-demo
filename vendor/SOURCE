@@ -1,0 +1,6 @@
+commit: ad0592a555cdc1110e006b5c8b989a5e02e634a6
+repo: https://github.com/aoelvp94/airflow
+branch: s3-dag-bundle-archive-staging
+path: providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py
+upstream_pr: https://github.com/apache/airflow/pull/73015
+note: Byte-for-byte copy of s3.py at that commit. The image overlays this file onto airflow.providers.amazon.aws.bundles.s3 so S3ArchiveDagBundle is the archive classpath and S3DagBundle stays the prefix sync.

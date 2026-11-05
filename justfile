@@ -26,7 +26,7 @@ seed:
     [ -n "$minio_id" ] || { echo "MinIO is not running — run 'just up' first"; exit 1; }
     network=$(docker inspect "$minio_id" --format '{{{{range $k, $v := .NetworkSettings.Networks}}{{{{$k}}{{{{end}}')
     docker run --rm --network "$network" -v "$PWD/bundle_build:/build:ro" \
-        --entrypoint sh minio/mc -c '
+        --entrypoint sh pgsty/silo:RELEASE.2026-10-26T00-00-00Z -c '
         mc alias set demo http://minio:9000 minioadmin minioadmin &&
         mc mb -p demo/dag-bundles &&
         mc mirror --overwrite --remove /build/dags demo/dag-bundles/dags &&
@@ -55,7 +55,7 @@ trace:
     set -euo pipefail
     minio_id=$(docker ps -qf name=minio | head -1)
     network=$(docker inspect "$minio_id" --format '{{{{range $k, $v := .NetworkSettings.Networks}}{{{{$k}}{{{{end}}')
-    docker run --rm -it --network "$network" --entrypoint sh minio/mc -c \
+    docker run --rm -it --network "$network" --entrypoint sh pgsty/silo:RELEASE.2026-10-26T00-00-00Z -c \
         'mc alias set demo http://minio:9000 minioadmin minioadmin && mc admin trace --call s3 demo'
 
 # The whole reproduction: generate -> start -> seed -> benchmark
