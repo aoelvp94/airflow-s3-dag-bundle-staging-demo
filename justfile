@@ -41,13 +41,18 @@ bench rounds="3":
     [ -n "$scheduler" ] || { echo "Scheduler is not running — run 'just up' first"; exit 1; }
     docker exec "$scheduler" python /usr/local/airflow/include/benchmark.py {{rounds}}
 
-# Show how the DAG processor staged the two live bundles
+# Show how the DAG processor refreshed the two live bundles.
+# Archive staging logs at debug ("Staged Dag bundle from archive").
 logs:
     #!/usr/bin/env bash
     set -euo pipefail
     dp=$(docker ps -qf name=dag-processor | head -1)
     [ -n "$dp" ] || dp=$(docker ps -qf name=scheduler | head -1)
-    docker logs "$dp" 2>&1 | grep -iE "staged|refreshing bundle|falling back|sync_to_local" | tail -40
+    docker logs "$dp" 2>&1 | grep -iE "staged|refreshing bundle|archive|downloading dags|etag" | tail -40
+
+# Host check of the vendored upstream bundle module (no Docker)
+check:
+    python3 -m unittest tests.test_vendored_s3_bundle
 
 # Watch every S3 API call MinIO serves, live (Ctrl+C to stop)
 trace:

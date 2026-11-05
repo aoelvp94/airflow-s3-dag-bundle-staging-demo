@@ -12,7 +12,7 @@ a [MinIO](https://min.io) container standing in for S3. **No AWS account, no
 cloud requests, nothing is uploaded anywhere.**
 
 ```
-per-object sync (stock)                  single archive (this PoC)
+per-object sync (S3DagBundle)            single archive (S3ArchiveDagBundle)
 
 worker start                             worker start
   │                                        │
@@ -23,6 +23,40 @@ worker start                             worker start
   ├─ HEAD file_400 ── GET file_400  ─┘     task code runs
   task code runs
 ```
+
+## Classpath
+
+The image installs `apache-airflow-providers-amazon==9.37.0` (the newest
+release whose `common-compat` floor matches Astro Runtime 3.3-7) and overlays
+[`vendor/s3.py`](vendor/s3.py), a verbatim copy of
+[`airflow.providers.amazon.aws.bundles.s3`](https://github.com/apache/airflow/blob/ad0592a555cdc1110e006b5c8b989a5e02e634a6/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
+at commit `ad0592a` ([apache/airflow#73015](https://github.com/apache/airflow/pull/73015)).
+Provenance and the sha256 are in [`vendor/UPSTREAM.txt`](vendor/UPSTREAM.txt).
+
+Both the live DAG processor config and `include/benchmark.py` import that module:
+
+| bundle | classpath | kwargs |
+|---|---|---|
+| per-object | `airflow.providers.amazon.aws.bundles.s3.S3DagBundle` | `bucket_name`, `prefix`, `aws_conn_id` |
+| archive | `airflow.providers.amazon.aws.bundles.s3.S3ArchiveDagBundle` | `bucket_name`, `archive_key`, `aws_conn_id` |
+
+`S3DagBundle` is the prefix sync. `S3ArchiveDagBundle` is a separate class,
+configured by its own classpath, and it takes `archive_key` (the `.tar.gz`
+object). They share connection and local-directory setup through a private
+base. The archive is the only source of DAGs for the archive bundle.
+
+Behavior from that commit, which the host test (`just check`) locks in:
+
+- The ETag marker lives **beside** the bundle directory, at `.{name}/etag`
+  (for example `.../.s3-archive/etag`), so a prefix sync that deletes stale
+  files inside the bundle dir leaves the marker alone.
+- A refresh restages when that marker matches and the bundle directory is
+  missing or has no files (the cold-worker case).
+- The download is one `GetObject` with `If-Match`, streamed with
+  `shutil.copyfileobj` in 1 MiB chunks, then unpacked with `tarfile`
+  `filter="data"` and swapped into place by rename.
+- `S3DagBundle.refresh()` deletes `.{name}/etag` so a bundle name that
+  previously staged from an archive restages if it is pointed back at an archive.
 
 ## Why this matters
 
@@ -46,19 +80,12 @@ compressed artifact** (Spark archives, Lambda zips, container image layers);
 Airflow's `GitDagBundle` gets this implicitly, the object-store bundles don't
 — and the same serial loop is being ported to GCS and Azure bundles.
 
-`bundle_pkg/` contains a ~100-line proof of concept, `S3ArchiveDagBundle`,
-that subclasses the stock bundle and changes only the staging strategy: fetch
-one `.tar.gz` (conditional on ETag), unpack safely, atomically swap. The
-archive is **mutually exclusive with `prefix`** — it replaces the per-object
-sync rather than shadowing it, so there is no second copy of the DAGs to keep
-in sync and no fallback between the two.
-
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/)
 - [Astro CLI](https://www.astronomer.io/docs/astro/cli/install-cli) (`brew install astro`)
 - [just](https://github.com/casey/just) (`brew install just`)
-- Python 3.10+ on the host (stdlib only, used to generate the test bundle)
+- Python 3.10+ on the host (stdlib only, used to generate the test bundle and to run `just check`)
 
 ## Reproduce (one command)
 
@@ -75,9 +102,11 @@ That runs, in order:
 | 3 | `just seed` | creates bucket `dag-bundles`, uploads the files per-object **and** the archive — to local MinIO only |
 | 4 | `just bench` | inside the container: cold-stages both bundle classes 3×, timing each and reading **actual request counts from MinIO's metrics endpoint** |
 
-Each benchmark round deletes the bundle's local directory first — that's the
-fresh-worker simulation. Sample output (Apple Silicon laptop, everything on
-localhost — real S3 adds ~an order of magnitude more per-request latency):
+Each benchmark round deletes the bundle's local directory first and leaves the
+sibling `.{name}/etag` marker. That is the fresh-worker simulation: the archive
+class sees an empty directory and restages even when the ETag marker still
+matches. Sample output (Apple Silicon laptop, everything on localhost — real
+S3 adds ~an order of magnitude more per-request latency):
 
 ```
 Cold-staging benchmark, 3 rounds each (local dir wiped before every round)
@@ -88,34 +117,36 @@ Cold-staging benchmark, 3 rounds each (local dir wiped before every round)
   round 3:  23.32s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
 
 [2/2] S3ArchiveDagBundle — single tar.gz object
-  round 1:   3.21s   (getobject=1, headbucket=1, headobject=2)
-  round 2:   0.87s   (getobject=1, headbucket=1, headobject=2)
-  round 3:   1.48s   (getobject=1, headbucket=1, headobject=3, listobjectsv1=1)
+  round 1:   3.21s   (getobject=1, headbucket=1, headobject=1)
+  round 2:   0.87s   (getobject=1, headbucket=1, headobject=1)
+  round 3:   1.48s   (getobject=1, headbucket=1, headobject=1)
 
 ==========================================================================
 scenario                                   median   S3 reqs   files
 --------------------------------------------------------------------------
 per-object sync (stock S3DagBundle)        15.84s       802     400
-single archive (S3ArchiveDagBundle)         1.48s         5     400
+single archive (S3ArchiveDagBundle)         1.48s         2     400
 ==========================================================================
 
 speedup: 10.7x   (every KubernetesExecutor task pod pays the cold-staging cost)
 ```
 
-(Real run, Docker Desktop on a laptop. Round-to-round variance is Docker
-noise; the request counts are exact and perfectly stable: 400 GET + 400 HEAD
-+ listings vs one HEAD + one GET. The occasional stray request in a round is
-the live DAG processor refreshing its own bundles against the same MinIO.)
+Timings are from a loopback MinIO run on a laptop; round-to-round variance is
+Docker noise. Per-object counts stay at 400 GET + 400 HEAD plus listings. The
+archive classpath does one HeadObject (ETag) and one GetObject (1 MiB
+`copyfileobj`) per cold stage, plus the bucket HEAD from initialization. A
+stray call in a live round is the DAG processor refreshing its own bundles
+against the same MinIO.
 
-Note the per-object numbers here are against a *loopback* MinIO — real S3
-adds ~25–40 ms of network round-trip per request, which is why the same
-400-file bundle costs 20+ seconds per pod in a real deployment. The cost
-scales linearly with file count and per-request latency, not with bytes.
+(Real S3 adds ~25–40 ms of network round-trip per request, which is why the
+same 400-file bundle costs 20+ seconds per pod in a real deployment. The cost
+scales linearly with file count and per-request latency, not with bytes.)
 
 ## Poke around
 
 ```bash
-just logs    # how the DAG processor staged the two live bundles
+just check   # host unit test of the vendored module (marker, restage, copy size)
+just logs    # how the DAG processor refreshed the two live bundles
 just trace   # watch every S3 call MinIO serves, live (run during a bench)
 just bench 5 # more rounds
 ```
@@ -133,30 +164,40 @@ Two benign things you may see on a first run:
 - `astro dev start` can report *"The api-server health check timed out"* —
   the containers keep starting anyway (`docker ps` to confirm); it's just a
   slow first boot under Docker Desktop.
-- The DAG processor logs an *"S3 archive ... does not exist"* error for the
-  `s3-archive` bundle until `just seed` has run. `just e2e` necessarily starts
-  Airflow before seeding (the seed step uploads to MinIO, which `up` brings
-  up), so the window is expected; it clears on the next refresh once the
-  archive exists. The `s3-per-object` bundle is unaffected.
+- The DAG processor logs a HeadObject failure for the `s3-archive` bundle
+  (the archive key is not in the bucket yet) until `just seed` has run.
+  `just e2e` starts Airflow before seeding, because seed uploads to the MinIO
+  that `up` brings up. The error clears on the next refresh once the archive
+  object exists. The `s3-per-object` bundle is unaffected.
+
+Archive refresh messages (`Staged Dag bundle from archive ...`) are logged at
+debug. `just logs` filters for them; raise the component log level to debug
+if the processor is quiet at info.
 
 ## Where the behaviour lives upstream
 
-- [`S3DagBundle.refresh()`](https://github.com/apache/airflow/blob/main/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
-  → [`S3Hook.sync_to_local_dir()`](https://github.com/apache/airflow/blob/main/providers/amazon/src/airflow/providers/amazon/aws/hooks/s3.py):
+- This demo runs the S3 bundle module from
+  [ad0592a](https://github.com/apache/airflow/blob/ad0592a555cdc1110e006b5c8b989a5e02e634a6/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
+  ([#73015](https://github.com/apache/airflow/pull/73015)): `S3DagBundle.refresh()`
+  calls [`S3Hook.sync_to_local_dir()`](https://github.com/apache/airflow/blob/main/providers/amazon/src/airflow/providers/amazon/aws/hooks/s3.py),
   a serial `for obj in bucket.objects.filter(...)` loop, one blocking
-  `download_file` per object, no concurrency knob, no archive mode.
+  `download_file` per object. `S3ArchiveDagBundle.refresh()` downloads
+  `archive_key` once.
 - The GCS bundle ([`GCSDagBundle`](https://github.com/apache/airflow/blob/main/providers/google/src/airflow/providers/google/cloud/bundles/gcs.py))
-  ports the same loop; an Azure Blob bundle with the same shape is in review
+  ports the same per-object loop; an Azure Blob bundle with the same shape is in review
   ([apache/airflow#67016](https://github.com/apache/airflow/pull/67016)).
 
 ## Layout
 
 ```
-bundle_pkg/            the S3ArchiveDagBundle proof of concept (pip-installed into the image)
-scripts/generate_bundle.py   synthetic bundle generator (host, stdlib only)
+vendor/s3.py           verbatim S3DagBundle + S3ArchiveDagBundle from ad0592a
+vendor/UPSTREAM.txt    commit URL and sha256
 include/benchmark.py   in-container benchmark (timings + MinIO request counts)
+scripts/generate_bundle.py   synthetic bundle generator (host, stdlib only)
+tests/test_vendored_s3_bundle.py   host test of the vendored module
 docker-compose.override.yml  adds MinIO to astro's compose stack
 .env                   AWS connection (→ MinIO) + live bundle config; local-only values
+Dockerfile             installs the Amazon provider and overlays vendor/s3.py
 justfile               all of the above, wired end to end
 ```
 
@@ -166,9 +207,12 @@ justfile               all of the above, wired end to end
   the DAGs directory (`tar -C dags .`) rather than the directory itself. The
   benchmark relies on both strategies producing an identical tree so the
   comparison is like-for-like.
-- The PoC extracts with `tarfile`'s `filter="data"` (path-traversal safe) and
-  swaps directories by rename, keeping partially-staged states invisible.
-- `prefix` and `archive_key` are mutually exclusive; passing both raises at
-  construction. Delete the archive object and rerun `just bench` to watch the
-  archive bundle fail loudly instead of silently staging from somewhere else —
-  that is the point of dropping the fallback.
+- The archive class extracts with `tarfile`'s `filter="data"` (path-traversal
+  safe; requires Python 3.11.4+, which Astro Runtime 3.3 has) and swaps
+  directories by rename, keeping partially-staged states invisible. Staging
+  leftovers live under `.{name}/archive-staging-*` and are removed on the
+  next refresh.
+- Give the per-object bundle a `prefix` and the archive bundle an
+  `archive_key`. Those are parameters of two classes. Removing the archive
+  object and rerunning `just bench` makes `S3ArchiveDagBundle` fail on
+  HeadObject; it has no second source to stage from.

@@ -7,6 +7,12 @@ bundle's local directory first, simulating what every fresh worker pod
 experiences under KubernetesExecutor: an empty filesystem, so the full
 staging cost sits on the critical path of the task start.
 
+Both classes come from the provider module after the image overlays
+``vendor/s3.py`` (apache/airflow ad0592a):
+
+    airflow.providers.amazon.aws.bundles.s3.S3DagBundle          prefix=
+    airflow.providers.amazon.aws.bundles.s3.S3ArchiveDagBundle   archive_key=
+
 S3 request counts are read from MinIO's Prometheus endpoint before/after each
 round, so the numbers are what the "S3" server actually served, not estimates.
 """
@@ -20,9 +26,7 @@ import sys
 import time
 import urllib.request
 
-from airflow.providers.amazon.aws.bundles.s3 import S3DagBundle
-
-from s3_archive_bundle import S3ArchiveDagBundle
+from airflow.providers.amazon.aws.bundles.s3 import S3ArchiveDagBundle, S3DagBundle
 
 METRICS_URL = "http://minio:9000/minio/v2/metrics/cluster"
 BUCKET = "dag-bundles"

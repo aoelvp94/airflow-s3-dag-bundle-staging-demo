@@ -1,0 +1,6 @@
+source: https://github.com/apache/airflow/blob/ad0592a555cdc1110e006b5c8b989a5e02e634a6/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py
+commit: ad0592a555cdc1110e006b5c8b989a5e02e634a6
+pull: https://github.com/apache/airflow/pull/73015
+sha256: 6608a8e05d873bd5a26e4f75e7a35e495934160df4369df12ee67b48ccdb6670
+file: s3.py
+note: verbatim copy; the image overlays this onto airflow.providers.amazon.aws.bundles.s3
