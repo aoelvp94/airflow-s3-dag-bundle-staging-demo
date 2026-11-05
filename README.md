@@ -8,8 +8,9 @@ KubernetesExecutor every task instance is a fresh worker, which puts the full
 staging cost on the critical path of every task start.
 
 Everything runs on your machine: `astro dev` (Astronomer's local Airflow) plus
-a [MinIO](https://min.io) container standing in for S3. **No AWS account, no
-cloud requests, nothing is uploaded anywhere.**
+a [Silo](https://github.com/pgsty/silo) container standing in for S3
+(MinIO-compatible; `minio/minio` and `minio/mc` are gone from Docker Hub).
+**No AWS account, no cloud requests, nothing is uploaded anywhere.**
 
 ```
 per-object sync (S3DagBundle)            single archive (S3ArchiveDagBundle)
@@ -141,6 +142,20 @@ against the same MinIO.
 (Real S3 adds ~25–40 ms of network round-trip per request, which is why the
 same 400-file bundle costs 20+ seconds per pod in a real deployment. The cost
 scales linearly with file count and per-request latency, not with bytes.)
+
+`just bench` against this tree (Runtime 3.3-7, amazon provider 9.37.0 with
+`vendor/s3.py` from `ad0592a` overlaid, Silo on the loopback, 400 files):
+
+| scenario | rounds | median | requests each round | files |
+|---|---|---|---|---|
+| `S3DagBundle` prefix, cold | 2.16s, 1.93s, 2.06s | 2.06s | get=400, head=400, list v1=1, list v2=1, head-bucket=1 | 400 |
+| `S3ArchiveDagBundle`, cold | 0.12s, 0.12s, 0.14s | 0.12s | get=1, head=1, head-bucket=1 | 400 |
+
+The recipe's summary column counts GET + HEAD + LIST (802 vs 2) and reports a
+16.9× speedup. A warm pass with the directory left in place, not part of
+`just bench`: prefix 0.245s (one bucket HEAD and two listings, no GET) and
+archive 0.064s (one bucket HEAD and one archive HEAD, no GET). Both still had
+400 files on disk.
 
 ## Poke around
 

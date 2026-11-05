@@ -1,6 +1,8 @@
 services:
   minio:
-    image: minio/minio:latest
+    # minio/minio and minio/mc were removed from Docker Hub. Silo is
+    # MinIO-compatible and still publishes minio_s3_requests_total.
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
