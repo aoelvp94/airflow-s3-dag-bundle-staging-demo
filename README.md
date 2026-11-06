@@ -117,33 +117,31 @@ That runs, in order:
 Each benchmark round deletes the bundle's local directory first. `.archive_etag`
 lives inside that directory, so the wipe removes the marker. That is the
 fresh-worker simulation: the archive class sees neither a marker nor Dag files
-and restages. The figures below are the last loopback `just bench` run, taken
-against vendored tip `ad0592a` (Astro Runtime 3.3-7, Airflow 3.3.1+astro.4,
-amazon provider 9.37.0). Cold staging in `602dc7b` is still one HeadObject
-plus one GetObject for the archive, and the same per-object HEAD/GET loop for
-`S3DagBundle`. Real S3 adds ~an order of magnitude more per-request latency:
+and restages. Measured with `just bench` on loopback Silo (Astro Runtime 3.3-7,
+Airflow 3.3.1+astro.4, amazon provider 9.37.0, `vendor/s3.py` from `602dc7b`).
+Real S3 adds ~an order of magnitude more per-request latency:
 
 ```
 Cold-staging benchmark, 3 rounds each (local dir wiped before every round)
 
 [1/2] stock S3DagBundle — serial per-object sync
-  round 1:   2.08s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
-  round 2:   2.02s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
-  round 3:   2.11s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
+  round 1:   2.15s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
+  round 2:   2.17s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
+  round 3:   2.04s   (getobject=400, headbucket=1, headobject=400, listobjectsv1=1, listobjectsv2=1)
 
 [2/2] S3ArchiveDagBundle — single tar.gz object
-  round 1:   0.11s   (getobject=1, headbucket=1, headobject=1)
-  round 2:   0.11s   (getobject=1, headbucket=1, headobject=1)
+  round 1:   0.14s   (getobject=1, headbucket=1, headobject=1)
+  round 2:   0.12s   (getobject=1, headbucket=1, headobject=1)
   round 3:   0.14s   (getobject=1, headbucket=1, headobject=1)
 
 ==========================================================================
 scenario                                   median   S3 reqs   files
 --------------------------------------------------------------------------
-per-object sync (stock S3DagBundle)         2.08s       802     400
-single archive (S3ArchiveDagBundle)         0.11s         2     400
+per-object sync (stock S3DagBundle)         2.15s       802     400
+single archive (S3ArchiveDagBundle)         0.14s         2     400
 ==========================================================================
 
-speedup: 18.5x   (every KubernetesExecutor task pod pays the cold-staging cost)
+speedup: 15.6x   (every KubernetesExecutor task pod pays the cold-staging cost)
 ```
 
 The request mix did not move between rounds. Stock cold staging is 400 GET
@@ -154,25 +152,22 @@ plus that bucket HEAD — 2 calls in the table. These rounds had no stray
 requests from the live DAG processor. Another run can pick one up when that
 processor refreshes its own bundles against the same MinIO.
 
-Loopback MinIO makes each stock call about 3 ms, so 18.5× wall clock is the
+Loopback Silo makes each stock call about 3 ms, so 15.6× wall clock is the
 floor on this machine. Real S3 adds ~25–40 ms of network round-trip per
 request, which is why the same 400-file bundle costs 20+ seconds per pod in
 a real deployment. The cost scales linearly with file count and per-request
 latency, not with bytes.
 
-Same `ad0592a` loopback run, summarized (Runtime 3.3-7, amazon provider 9.37.0,
-Silo, 400 files):
+Same run, summarized (Runtime 3.3-7, amazon provider 9.37.0, `vendor/s3.py`
+from `602dc7b`, Silo, 400 files, ~3.1 MiB):
 
 | scenario | rounds | median | requests each round | files |
 |---|---|---|---|---|
-| `S3DagBundle` prefix, cold | 2.16s, 1.93s, 2.06s | 2.06s | get=400, head=400, list v1=1, list v2=1, head-bucket=1 | 400 |
-| `S3ArchiveDagBundle`, cold | 0.12s, 0.12s, 0.14s | 0.12s | get=1, head=1, head-bucket=1 | 400 |
+| `S3DagBundle` prefix, cold | 2.15s, 2.17s, 2.04s | 2.15s | get=400, head=400, list v1=1, list v2=1, head-bucket=1 | 400 |
+| `S3ArchiveDagBundle`, cold | 0.14s, 0.12s, 0.14s | 0.14s | get=1, head=1, head-bucket=1 | 400 |
 
 The recipe's summary column counts GET + HEAD + LIST (802 vs 2) and reports a
-16.9× speedup. A warm pass with the directory left in place, not part of
-`just bench`: prefix 0.245s (one bucket HEAD and two listings, no GET) and
-archive 0.064s (one bucket HEAD and one archive HEAD, no GET). Both still had
-400 files on disk.
+15.6× speedup.
 
 ## Poke around
 
