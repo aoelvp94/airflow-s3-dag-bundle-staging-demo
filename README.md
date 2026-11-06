@@ -30,8 +30,9 @@ worker start                             worker start
 The image installs `apache-airflow-providers-amazon==9.37.0` (the newest
 release whose `common-compat` floor matches Astro Runtime 3.3-7) and overlays
 [`vendor/s3.py`](vendor/s3.py), a verbatim copy of
-[`airflow.providers.amazon.aws.bundles.s3`](https://github.com/apache/airflow/blob/ad0592a555cdc1110e006b5c8b989a5e02e634a6/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
-at commit `ad0592a` ([apache/airflow#73015](https://github.com/apache/airflow/pull/73015)).
+[`airflow.providers.amazon.aws.bundles.s3`](https://github.com/apache/airflow/blob/602dc7b533f2b4732dc4bcb78a6f716731fc4d16/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
+at commit `602dc7b` ([apache/airflow#73015](https://github.com/apache/airflow/pull/73015),
+`aoelvp94/airflow` branch `s3-dag-bundle-archive-staging`).
 Provenance and the sha256 are in [`vendor/UPSTREAM.txt`](vendor/UPSTREAM.txt).
 
 Both the live DAG processor config and `include/benchmark.py` import that module:
@@ -48,16 +49,26 @@ base. The archive is the only source of DAGs for the archive bundle.
 
 Behavior from that commit, which the host test (`just check`) locks in:
 
-- The ETag marker lives **beside** the bundle directory, at `.{name}/etag`
-  (for example `.../.s3-archive/etag`), so a prefix sync that deletes stale
-  files inside the bundle dir leaves the marker alone.
-- A refresh restages when that marker matches and the bundle directory is
-  missing or has no files (the cold-worker case).
+- The ETag marker lives **inside** the staged tree, at `{s3_dags_dir}/.archive_etag`
+  (for example `.../s3-archive/.archive_etag`). `_bundle_dir_has_files()` ignores
+  that marker, so a directory that contains only `.archive_etag` is treated as
+  empty and restaged.
+- A refresh skips the download when the marker matches the object ETag and the
+  tree still has other files. It restages when the marker is missing or the
+  tree has no files besides the marker (the cold-worker case, including a
+  wiped local directory).
 - The download is one `GetObject` with `If-Match`, streamed with
   `shutil.copyfileobj` in 1 MiB chunks, then unpacked with `tarfile`
-  `filter="data"` and swapped into place by rename.
-- `S3DagBundle.refresh()` deletes `.{name}/etag` so a bundle name that
-  previously staged from an archive restages if it is pointed back at an archive.
+  `filter="data"` and swapped into place by rename. The constructor checks
+  `tarfile.data_filter` once; extract does not check again.
+- `refresh()` on the shared base rejects a versioned refresh, takes the bundle
+  lock, and calls `_refresh_locked()`. Loggers come from `_get_logger()`.
+- Staging leftovers live beside the tree, under `.{name}/archive-staging-*`,
+  and are removed on the next refresh.
+- `S3DagBundle.refresh()` does not unlink `.archive_etag` itself. It syncs
+  with `delete_stale=True`, so a prefix refresh removes the marker when the
+  remote prefix does not contain that name. Pointing the same bundle name
+  back at an archive then restages.
 
 ## Why this matters
 
@@ -103,12 +114,14 @@ That runs, in order:
 | 3 | `just seed` | creates bucket `dag-bundles`, uploads the files per-object **and** the archive — to local MinIO only |
 | 4 | `just bench` | inside the container: cold-stages both bundle classes 3×, timing each and reading **actual request counts from MinIO's metrics endpoint** |
 
-Each benchmark round deletes the bundle's local directory first and leaves the
-sibling `.{name}/etag` marker. That is the fresh-worker simulation: the archive
-class sees an empty directory and restages even when the ETag marker still
-matches. Measured with `just bench` on loopback MinIO (Astro Runtime 3.3-7,
-Airflow 3.3.1+astro.4, amazon provider 9.37.0). Real S3 adds ~an order of
-magnitude more per-request latency:
+Each benchmark round deletes the bundle's local directory first. `.archive_etag`
+lives inside that directory, so the wipe removes the marker. That is the
+fresh-worker simulation: the archive class sees neither a marker nor Dag files
+and restages. The figures below are the last loopback `just bench` run, taken
+against vendored tip `ad0592a` (Astro Runtime 3.3-7, Airflow 3.3.1+astro.4,
+amazon provider 9.37.0). Cold staging in `602dc7b` is still one HeadObject
+plus one GetObject for the archive, and the same per-object HEAD/GET loop for
+`S3DagBundle`. Real S3 adds ~an order of magnitude more per-request latency:
 
 ```
 Cold-staging benchmark, 3 rounds each (local dir wiped before every round)
@@ -147,8 +160,8 @@ request, which is why the same 400-file bundle costs 20+ seconds per pod in
 a real deployment. The cost scales linearly with file count and per-request
 latency, not with bytes.
 
-`just bench` against this tree (Runtime 3.3-7, amazon provider 9.37.0 with
-`vendor/s3.py` from `ad0592a` overlaid, Silo on the loopback, 400 files):
+Same `ad0592a` loopback run, summarized (Runtime 3.3-7, amazon provider 9.37.0,
+Silo, 400 files):
 
 | scenario | rounds | median | requests each round | files |
 |---|---|---|---|---|
@@ -196,12 +209,12 @@ if the processor is quiet at info.
 ## Where the behaviour lives upstream
 
 - This demo runs the S3 bundle module from
-  [ad0592a](https://github.com/apache/airflow/blob/ad0592a555cdc1110e006b5c8b989a5e02e634a6/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
-  ([#73015](https://github.com/apache/airflow/pull/73015)): `S3DagBundle.refresh()`
+  [602dc7b](https://github.com/apache/airflow/blob/602dc7b533f2b4732dc4bcb78a6f716731fc4d16/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py)
+  ([#73015](https://github.com/apache/airflow/pull/73015)): `S3DagBundle._refresh_locked()`
   calls [`S3Hook.sync_to_local_dir()`](https://github.com/apache/airflow/blob/main/providers/amazon/src/airflow/providers/amazon/aws/hooks/s3.py),
   a serial `for obj in bucket.objects.filter(...)` loop, one blocking
-  `download_file` per object. `S3ArchiveDagBundle.refresh()` downloads
-  `archive_key` once.
+  `download_file` per object. `S3ArchiveDagBundle._refresh_locked()` downloads
+  `archive_key` once and records the ETag at `{s3_dags_dir}/.archive_etag`.
 - The GCS bundle ([`GCSDagBundle`](https://github.com/apache/airflow/blob/main/providers/google/src/airflow/providers/google/cloud/bundles/gcs.py))
   ports the same per-object loop; an Azure Blob bundle with the same shape is in review
   ([apache/airflow#67016](https://github.com/apache/airflow/pull/67016)).
@@ -209,7 +222,7 @@ if the processor is quiet at info.
 ## Layout
 
 ```
-vendor/s3.py           verbatim S3DagBundle + S3ArchiveDagBundle from ad0592a
+vendor/s3.py           verbatim S3DagBundle + S3ArchiveDagBundle from 602dc7b
 vendor/UPSTREAM.txt    commit URL and sha256
 include/benchmark.py   in-container benchmark (timings + MinIO request counts)
 scripts/generate_bundle.py   synthetic bundle generator (host, stdlib only)
@@ -230,7 +243,7 @@ justfile               all of the above, wired end to end
   safe; requires Python 3.11.4+, which Astro Runtime 3.3 has) and swaps
   directories by rename, keeping partially-staged states invisible. Staging
   leftovers live under `.{name}/archive-staging-*` and are removed on the
-  next refresh.
+  next refresh. The ETag marker is `.archive_etag` inside the staged tree.
 - Give the per-object bundle a `prefix` and the archive bundle an
   `archive_key`. Those are parameters of two classes. Removing the archive
   object and rerunning `just bench` makes `S3ArchiveDagBundle` fail on

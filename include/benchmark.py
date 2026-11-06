@@ -3,12 +3,13 @@
 Benchmark cold DAG-bundle staging: stock per-object sync vs single archive.
 
 Runs INSIDE an Airflow container (see `just bench`). Each round wipes the
-bundle's local directory first, simulating what every fresh worker pod
+bundle's local directory first, which also removes the in-tree
+``.archive_etag`` marker. That simulates what every fresh worker pod
 experiences under KubernetesExecutor: an empty filesystem, so the full
 staging cost sits on the critical path of the task start.
 
 Both classes come from the provider module after the image overlays
-``vendor/s3.py`` (apache/airflow ad0592a):
+``vendor/s3.py`` (apache/airflow 602dc7b, PR #73015):
 
     airflow.providers.amazon.aws.bundles.s3.S3DagBundle          prefix=
     airflow.providers.amazon.aws.bundles.s3.S3ArchiveDagBundle   archive_key=

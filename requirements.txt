@@ -1,3 +1,3 @@
 # Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
 # apache-airflow-providers-amazon==9.37.0 is installed by the Dockerfile, which
-# then overlays vendor/s3.py (S3ArchiveDagBundle from apache/airflow ad0592a).
+# then overlays vendor/s3.py (S3ArchiveDagBundle from apache/airflow 602dc7b).

@@ -1,8 +1,11 @@
-"""Host-side checks for vendor/s3.py (apache/airflow ad0592a).
+"""Host-side checks for vendor/s3.py (apache/airflow 602dc7b).
 
 Airflow itself is stubbed. The test locks the behavior this demo relies on:
-sibling ETag marker ``.{name}/etag``, restage when the bundle directory is
-empty, 1 MiB ``copyfileobj``, and ``S3DagBundle.refresh`` dropping that marker.
+in-tree ETag marker ``{s3_dags_dir}/.archive_etag``, restage when the bundle
+directory has no files besides that marker, 1 MiB ``copyfileobj``, and a
+single ``tarfile.data_filter`` check in the constructor (extract does not
+repeat it). ``S3DagBundle.refresh`` syncs with ``delete_stale`` and does not
+unlink the marker itself.
 """
 
 from __future__ import annotations
@@ -172,7 +175,7 @@ def _install_stubs(root: Path) -> None:
 
 
 def _load_bundle_module():
-    spec = importlib.util.spec_from_file_location("vendored_s3_bundle_ad0592a", VENDORED)
+    spec = importlib.util.spec_from_file_location("vendored_s3_bundle_602dc7b", VENDORED)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {VENDORED}")
     module = importlib.util.module_from_spec(spec)
@@ -199,26 +202,37 @@ class VendoredS3BundleTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
-        sys.modules.pop("vendored_s3_bundle_ad0592a", None)
+        sys.modules.pop("vendored_s3_bundle_602dc7b", None)
 
     def test_archive_marker_restage_and_copy_size(self) -> None:
+        require_calls: list[str] = []
+        real_require = self.bundle_mod._require_tar_data_filter
+
+        def _count_require() -> None:
+            require_calls.append("require")
+            return real_require()
+
+        self.bundle_mod._require_tar_data_filter = _count_require
+
         bundle = self.bundle_mod.S3ArchiveDagBundle(
             name="bench-archive",
             bucket_name="dag-bundles",
             archive_key="archive/dag-bundle.tar.gz",
             aws_conn_id="aws_default",
         )
-        stale = bundle._archive_state_dir() / "archive-staging-leftover"
+        stale = bundle._get_archive_state_dir() / "archive-staging-leftover"
         stale.mkdir(parents=True)
         (stale / "junk").write_text("x")
 
         bundle.initialize()
 
-        marker = self.root / ".bench-archive" / "etag"
-        self.assertEqual(marker, bundle._archive_etag_path())
+        # Constructor checks tarfile.data_filter once. Extract does not.
+        self.assertEqual(require_calls, ["require"])
+        marker = bundle.path / ".archive_etag"
+        self.assertEqual(marker, bundle._get_archive_etag_path())
         self.assertTrue(marker.is_file())
         self.assertEqual(marker.read_text(), '"etag-1"')
-        self.assertFalse((bundle.path / ".staged-archive-etag").exists())
+        self.assertFalse((self.root / ".bench-archive" / "etag").exists())
         self.assertEqual((bundle.path / "demo_dag.py").read_text(), "print('staged')\n")
         self.assertFalse(stale.exists())
         self.assertEqual(self.copied_lengths, [COPYFILEOBJ_LENGTH])
@@ -229,33 +243,45 @@ class VendoredS3BundleTest(unittest.TestCase):
 
         bundle.refresh()
         self.assertEqual(len(_S3Hook.client.gets), 1)
+        self.assertEqual(require_calls, ["require"])
 
-        for path in bundle.path.rglob("*"):
-            if path.is_file():
+        for path in list(bundle.path.rglob("*")):
+            if path.is_file() and path != marker:
                 path.unlink()
+        self.assertTrue(marker.is_file())
+        self.assertFalse(bundle._bundle_dir_has_files())
         bundle.refresh()
         self.assertEqual(len(_S3Hook.client.gets), 2)
         self.assertTrue((bundle.path / "demo_dag.py").is_file())
+        self.assertEqual((bundle.path / ".archive_etag").read_text(), '"etag-1"')
 
         shutil.rmtree(bundle.base_dir)
+        self.assertFalse((bundle.path / ".archive_etag").exists())
         bundle.initialize()
         self.assertEqual(len(_S3Hook.client.gets), 3)
-        self.assertTrue(marker.is_file())
+        self.assertEqual((bundle.path / ".archive_etag").read_text(), '"etag-1"')
+        self.assertFalse((self.root / ".bench-archive" / "etag").exists())
+        self.assertEqual(require_calls, ["require"])
 
-    def test_prefix_bundle_drops_archive_marker(self) -> None:
+    def test_prefix_bundle_leaves_in_tree_etag_to_delete_stale(self) -> None:
         bundle = self.bundle_mod.S3DagBundle(
             name="bench-per-object",
             bucket_name="dag-bundles",
             prefix="dags",
             aws_conn_id="aws_default",
         )
-        marker = self.root / ".bench-per-object" / "etag"
-        marker.parent.mkdir(parents=True)
-        marker.write_text('"old"')
+        sibling = self.root / ".bench-per-object" / "etag"
+        sibling.parent.mkdir(parents=True)
+        sibling.write_text('"old-sibling"')
+        in_tree = bundle.s3_dags_dir / ".archive_etag"
+        in_tree.write_text('"old-in-tree"')
 
         bundle.refresh()
 
-        self.assertFalse(marker.exists())
+        # The prefix class does not unlink markers. delete_stale on the hook
+        # is what drops an in-tree .archive_etag that the remote prefix lacks.
+        self.assertEqual(sibling.read_text(), '"old-sibling"')
+        self.assertEqual(in_tree.read_text(), '"old-in-tree"')
         self.assertEqual(len(_S3Hook.sync_calls), 1)
         self.assertEqual(_S3Hook.sync_calls[0]["s3_prefix"], "dags/")
         self.assertTrue(_S3Hook.sync_calls[0]["delete_stale"])

@@ -1,6 +1,7 @@
-source: https://github.com/apache/airflow/blob/ad0592a555cdc1110e006b5c8b989a5e02e634a6/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py
-commit: ad0592a555cdc1110e006b5c8b989a5e02e634a6
+source: https://github.com/apache/airflow/blob/602dc7b533f2b4732dc4bcb78a6f716731fc4d16/providers/amazon/src/airflow/providers/amazon/aws/bundles/s3.py
+commit: 602dc7b533f2b4732dc4bcb78a6f716731fc4d16
 pull: https://github.com/apache/airflow/pull/73015
-sha256: 6608a8e05d873bd5a26e4f75e7a35e495934160df4369df12ee67b48ccdb6670
+branch: aoelvp94/airflow s3-dag-bundle-archive-staging
+sha256: 4764a637424bc972ccc9e2aac049b5558240ed53865d425cd444a41981960ef5
 file: s3.py
 note: verbatim copy; the image overlays this onto airflow.providers.amazon.aws.bundles.s3
